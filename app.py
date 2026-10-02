@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import hashlib
 from datetime import datetime
+from groq import Groq
 
 
 # ============================================================
@@ -36,7 +37,7 @@ def init_database():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Users table
+    # Users
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,7 +47,7 @@ def init_database():
         )
     """)
 
-    # Products table
+    # Products
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +59,7 @@ def init_database():
         )
     """)
 
-    # Orders table
+    # Orders
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +71,7 @@ def init_database():
         )
     """)
 
-    # Order items table
+    # Order items
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS order_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +85,7 @@ def init_database():
     """)
 
     # ========================================================
-    # ALWAYS MAKE SURE THE ADMIN ACCOUNT IS CORRECT
+    # ADMIN ACCOUNT
     # Username: admin
     # Password: admin123
     # ========================================================
@@ -117,7 +118,7 @@ def init_database():
         )
 
     # ========================================================
-    # ADD SAMPLE PRODUCTS IF THERE ARE NO PRODUCTS
+    # SAMPLE PRODUCTS
     # ========================================================
 
     cursor.execute("SELECT COUNT(*) FROM products")
@@ -169,7 +170,6 @@ def init_database():
     conn.close()
 
 
-# Initialize database
 init_database()
 
 
@@ -192,9 +192,12 @@ if "role" not in st.session_state:
 if "cart" not in st.session_state:
     st.session_state.cart = {}
 
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+
 
 # ============================================================
-# LOGIN FUNCTION
+# LOGIN
 # ============================================================
 
 def login_user(username, password):
@@ -232,12 +235,193 @@ def login_user(username, password):
 # ============================================================
 
 def logout():
+
     st.session_state.logged_in = False
     st.session_state.user_id = None
     st.session_state.username = ""
     st.session_state.role = ""
     st.session_state.cart = {}
+    st.session_state.chat_messages = []
+
     st.rerun()
+
+
+# ============================================================
+# GET CURRENT PRODUCTS FROM DATABASE
+# ============================================================
+
+def get_all_products():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            name,
+            price,
+            inventory,
+            image,
+            description
+        FROM products
+        ORDER BY id
+        """
+    )
+
+    products = cursor.fetchall()
+
+    conn.close()
+
+    return products
+
+
+# ============================================================
+# CREATE STORE DATABASE CONTEXT FOR AI
+# ============================================================
+
+def get_store_context():
+
+    products = get_all_products()
+
+    if not products:
+        return "There are currently no products in the store."
+
+    lines = []
+
+    for product in products:
+
+        product_id = product[0]
+        name = product[1]
+        price = product[2]
+        inventory = product[3]
+        description = product[5] or ""
+
+        if inventory > 0:
+            availability = "IN STOCK"
+        else:
+            availability = "OUT OF STOCK"
+
+        lines.append(
+            f"""
+Product ID: {product_id}
+Product name: {name}
+Current price: ${price:.2f}
+Current inventory: {inventory}
+Availability: {availability}
+Description: {description}
+"""
+        )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# AI STORE CHATBOT
+# ============================================================
+
+def ask_store_ai(user_question):
+
+    # Get the REAL current data from the database
+    store_context = get_store_context()
+
+    try:
+
+        api_key = st.secrets["GROQ_API_KEY"]
+
+    except Exception:
+
+        return (
+            "The AI assistant is not configured yet. "
+            "Please add GROQ_API_KEY to Streamlit Secrets."
+        )
+
+    try:
+
+        client = Groq(api_key=api_key)
+
+        system_prompt = f"""
+You are the AI Store Assistant for CS Clothing Store.
+
+Your job is to help customers using ONLY the real store
+information supplied below.
+
+STORE DATABASE INFORMATION:
+{store_context}
+
+IMPORTANT RULES:
+
+1. Never invent a product.
+2. Never invent a price.
+3. Never invent inventory.
+4. Never claim something is in stock unless the database says
+   its inventory is greater than 0.
+5. Never claim something is out of stock unless the database
+   says its inventory is 0.
+6. Always use the CURRENT price from the database.
+7. Always use the CURRENT inventory from the database.
+8. If the requested product is not in the database, say that
+   the product is not currently listed in the store.
+9. If asked for recommendations, recommend only products
+   that exist in the database.
+10. For recommendations, prefer products that are currently
+    in stock.
+11. You can use product names and descriptions to explain
+    why products are related.
+12. Do not make up product features that are not in the
+    database.
+13. Keep answers clear and helpful.
+14. You may answer simple general questions about the products
+    using the supplied descriptions.
+15. If there is not enough information in the database, say so.
+
+Examples:
+
+Customer:
+"Do you have black shoes?"
+
+You should check the database and report the actual matching
+product, inventory, and price.
+
+Customer:
+"How much is the denim jacket?"
+
+Use the exact current database price.
+
+Customer:
+"Recommend something similar."
+
+Use actual products from the database and prefer products
+currently in stock.
+
+Remember:
+The database is the source of truth.
+"""
+
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_question
+                }
+            ],
+            temperature=0.2,
+            max_tokens=500
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+
+        return (
+            "Sorry, I could not connect to the AI service.\n\n"
+            f"Error: {str(e)}"
+        )
 
 
 # ============================================================
@@ -245,7 +429,9 @@ def logout():
 # ============================================================
 
 st.title("👗 CS Clothing Store")
-st.write("Welcome to our online clothing store!")
+st.write(
+    "Welcome to our online clothing store!"
+)
 
 
 # ============================================================
@@ -255,7 +441,10 @@ st.write("Welcome to our online clothing store!")
 if not st.session_state.logged_in:
 
     login_tab, register_tab = st.tabs(
-        ["🔐 Login", "📝 Customer Registration"]
+        [
+            "🔐 Login",
+            "📝 Customer Registration"
+        ]
     )
 
     # ========================================================
@@ -282,18 +471,29 @@ if not st.session_state.logged_in:
             use_container_width=True
         ):
 
-            if username.strip() == "" or password.strip() == "":
-                st.error("Please enter both username and password.")
+            if (
+                username.strip() == ""
+                or password.strip() == ""
+            ):
+
+                st.error(
+                    "Please enter both username and password."
+                )
 
             elif login_user(username, password):
+
                 st.success("Login successful!")
                 st.rerun()
 
             else:
-                st.error("Incorrect username or password.")
+
+                st.error(
+                    "Incorrect username or password."
+                )
 
         st.info(
-            "Demo Admin Login: username = admin, password = admin123"
+            "Demo Admin Login: "
+            "username = admin, password = admin123"
         )
 
     # ========================================================
@@ -327,15 +527,19 @@ if not st.session_state.logged_in:
         ):
 
             if new_username.strip() == "":
+
                 st.error("Please enter a username.")
 
             elif new_password.strip() == "":
+
                 st.error("Please enter a password.")
 
             elif new_password != confirm_password:
+
                 st.error("Passwords do not match.")
 
             elif new_username.lower() == "admin":
+
                 st.error("This username is reserved.")
 
             else:
@@ -351,7 +555,10 @@ if not st.session_state.logged_in:
                 existing_user = cursor.fetchone()
 
                 if existing_user:
-                    st.error("Username already exists.")
+
+                    st.error(
+                        "Username already exists."
+                    )
 
                 else:
 
@@ -389,21 +596,24 @@ else:
     # ========================================================
 
     st.sidebar.success(
-        "Logged in as: " + st.session_state.username
+        "Logged in as: "
+        + st.session_state.username
     )
 
     st.sidebar.write(
-        "Role: " + st.session_state.role.title()
+        "Role: "
+        + st.session_state.role.title()
     )
 
     if st.sidebar.button(
         "🚪 Logout",
         use_container_width=True
     ):
+
         logout()
 
     # ========================================================
-    # ADMIN DASHBOARD
+    # ADMIN
     # ========================================================
 
     if st.session_state.role == "admin":
@@ -419,30 +629,22 @@ else:
         )
 
         # ====================================================
-        # PRODUCTS AND INVENTORY
+        # PRODUCTS & INVENTORY
         # ====================================================
 
         with admin_tabs[0]:
 
-            st.subheader("Manage Products & Inventory")
-
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
-                """
-                SELECT id, name, price, inventory, image, description
-                FROM products
-                ORDER BY id
-                """
+            st.subheader(
+                "Manage Products & Inventory"
             )
 
-            products = cursor.fetchall()
-
-            conn.close()
+            products = get_all_products()
 
             if not products:
-                st.info("No products available.")
+
+                st.info(
+                    "No products available."
+                )
 
             for product in products:
 
@@ -454,7 +656,8 @@ else:
                 product_description = product[5] or ""
 
                 with st.expander(
-                    f"{product_name} | ${product_price:.2f} | "
+                    f"{product_name} | "
+                    f"${product_price:.2f} | "
                     f"Inventory: {product_inventory}"
                 ):
 
@@ -528,7 +731,10 @@ else:
                             conn.commit()
                             conn.close()
 
-                            st.success("Product updated!")
+                            st.success(
+                                "Product updated!"
+                            )
+
                             st.rerun()
 
                     with col2:
@@ -553,7 +759,10 @@ else:
                             conn.commit()
                             conn.close()
 
-                            st.success("Product deleted!")
+                            st.success(
+                                "Product deleted!"
+                            )
+
                             st.rerun()
 
         # ====================================================
@@ -601,7 +810,10 @@ else:
             ):
 
                 if new_product_name.strip() == "":
-                    st.error("Please enter a product name.")
+
+                    st.error(
+                        "Please enter a product name."
+                    )
 
                 else:
 
@@ -611,7 +823,13 @@ else:
                     cursor.execute(
                         """
                         INSERT INTO products
-                        (name, price, inventory, image, description)
+                        (
+                            name,
+                            price,
+                            inventory,
+                            image,
+                            description
+                        )
                         VALUES (?, ?, ?, ?, ?)
                         """,
                         (
@@ -638,7 +856,9 @@ else:
 
         with admin_tabs[2]:
 
-            st.subheader("All Customer Orders")
+            st.subheader(
+                "All Customer Orders"
+            )
 
             conn = get_connection()
             cursor = conn.cursor()
@@ -663,7 +883,10 @@ else:
             conn.close()
 
             if not orders:
-                st.info("No orders have been placed yet.")
+
+                st.info(
+                    "No orders have been placed yet."
+                )
 
             else:
 
@@ -682,11 +905,13 @@ else:
                     ):
 
                         st.write(
-                            "Date: " + str(order_date)
+                            "Date: "
+                            + str(order_date)
                         )
 
                         st.write(
-                            "Payment: " + str(payment_status)
+                            "Payment: "
+                            + str(payment_status)
                         )
 
                         conn = get_connection()
@@ -700,7 +925,8 @@ else:
                                 order_items.price
                             FROM order_items
                             JOIN products
-                                ON order_items.product_id = products.id
+                                ON order_items.product_id =
+                                   products.id
                             WHERE order_items.order_id = ?
                             """,
                             (order_id,)
@@ -730,7 +956,8 @@ else:
             [
                 "🛍️ Shop",
                 "🛒 Shopping Cart",
-                "📜 Order History"
+                "📜 Order History",
+                "🤖 AI Store Assistant"
             ]
         )
 
@@ -740,31 +967,17 @@ else:
 
         with customer_tabs[0]:
 
-            st.subheader("Available Products")
-
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
-                """
-                SELECT
-                    id,
-                    name,
-                    price,
-                    inventory,
-                    image,
-                    description
-                FROM products
-                ORDER BY id
-                """
+            st.subheader(
+                "Available Products"
             )
 
-            products = cursor.fetchall()
-
-            conn.close()
+            products = get_all_products()
 
             if not products:
-                st.info("No products are currently available.")
+
+                st.info(
+                    "No products are currently available."
+                )
 
             for product in products:
 
@@ -782,26 +995,36 @@ else:
                 with col1:
 
                     if product_image:
+
                         try:
+
                             st.image(
                                 product_image,
                                 use_container_width=True
                             )
+
                         except:
-                            st.write("Image unavailable.")
+
+                            st.write(
+                                "Image unavailable."
+                            )
 
                 with col2:
 
-                    st.subheader(product_name)
+                    st.subheader(
+                        product_name
+                    )
 
-                    st.write(product_description)
+                    st.write(
+                        product_description
+                    )
 
                     st.write(
                         f"### ${product_price:.2f}"
                     )
 
                     st.write(
-                        f"Available inventory: "
+                        "Available inventory: "
                         f"{product_inventory}"
                     )
 
@@ -831,10 +1054,14 @@ else:
                                 )
 
                                 new_quantity = (
-                                    current_quantity + quantity
+                                    current_quantity
+                                    + quantity
                                 )
 
-                                if new_quantity <= product_inventory:
+                                if (
+                                    new_quantity
+                                    <= product_inventory
+                                ):
 
                                     st.session_state.cart[
                                         product_id
@@ -866,7 +1093,9 @@ else:
 
                     else:
 
-                        st.error("Out of stock.")
+                        st.error(
+                            "Out of stock."
+                        )
 
                 st.divider()
 
@@ -876,11 +1105,15 @@ else:
 
         with customer_tabs[1]:
 
-            st.subheader("🛒 Your Shopping Cart")
+            st.subheader(
+                "🛒 Your Shopping Cart"
+            )
 
             if not st.session_state.cart:
 
-                st.info("Your shopping cart is empty.")
+                st.info(
+                    "Your shopping cart is empty."
+                )
 
             else:
 
@@ -895,7 +1128,8 @@ else:
                     ]
 
                     item_total = (
-                        item["price"] * item["quantity"]
+                        item["price"]
+                        * item["quantity"]
                     )
 
                     total += item_total
@@ -905,16 +1139,19 @@ else:
                     )
 
                     with col1:
+
                         st.write(
                             f"**{item['name']}**"
                         )
 
                     with col2:
+
                         st.write(
                             f"${item['price']:.2f}"
                         )
 
                     with col3:
+
                         st.write(
                             f"Qty: {item['quantity']}"
                         )
@@ -938,11 +1175,9 @@ else:
                     f"Total: ${total:.2f}"
                 )
 
-                # =================================================
-                # CHECKOUT
-                # =================================================
-
-                st.markdown("### 💳 Checkout")
+                st.markdown(
+                    "### 💳 Checkout"
+                )
 
                 payment_method = st.selectbox(
                     "Payment Method",
@@ -953,8 +1188,8 @@ else:
                 )
 
                 st.info(
-                    "This is a school-project demo payment. "
-                    "No real money is charged."
+                    "This is a school-project demo "
+                    "payment. No real money is charged."
                 )
 
                 if st.button(
@@ -964,10 +1199,6 @@ else:
 
                     conn = get_connection()
                     cursor = conn.cursor()
-
-                    # ---------------------------------------------
-                    # Check inventory again before completing order
-                    # ---------------------------------------------
 
                     inventory_problem = False
 
@@ -989,12 +1220,17 @@ else:
                         result = cursor.fetchone()
 
                         if result is None:
+
                             inventory_problem = True
                             break
 
                         current_inventory = result[0]
 
-                        if quantity > current_inventory:
+                        if (
+                            quantity
+                            > current_inventory
+                        ):
+
                             inventory_problem = True
                             break
 
@@ -1009,12 +1245,10 @@ else:
 
                     else:
 
-                        # -----------------------------------------
-                        # Create order
-                        # -----------------------------------------
-
-                        order_date = datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S"
+                        order_date = (
+                            datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
                         )
 
                         cursor.execute(
@@ -1038,17 +1272,18 @@ else:
 
                         order_id = cursor.lastrowid
 
-                        # -----------------------------------------
-                        # Add order items
-                        # -----------------------------------------
-
-                        for product_id in st.session_state.cart:
+                        for product_id in (
+                            st.session_state.cart
+                        ):
 
                             item = st.session_state.cart[
                                 product_id
                             ]
 
-                            quantity = item["quantity"]
+                            quantity = item[
+                                "quantity"
+                            ]
+
                             price = item["price"]
 
                             cursor.execute(
@@ -1070,14 +1305,11 @@ else:
                                 )
                             )
 
-                            # -------------------------------------
-                            # Deduct inventory
-                            # -------------------------------------
-
                             cursor.execute(
                                 """
                                 UPDATE products
-                                SET inventory = inventory - ?
+                                SET inventory =
+                                    inventory - ?
                                 WHERE id = ?
                                 """,
                                 (
@@ -1089,12 +1321,12 @@ else:
                         conn.commit()
                         conn.close()
 
-                        # Clear shopping cart
                         st.session_state.cart = {}
 
                         st.success(
                             "🎉 Payment successful! "
-                            f"Your order #{order_id} has been placed."
+                            f"Your order #{order_id} "
+                            "has been placed."
                         )
 
                         st.rerun()
@@ -1105,7 +1337,9 @@ else:
 
         with customer_tabs[2]:
 
-            st.subheader("📜 Your Order History")
+            st.subheader(
+                "📜 Your Order History"
+            )
 
             conn = get_connection()
             cursor = conn.cursor()
@@ -1185,3 +1419,75 @@ else:
                                 f"Quantity: {item[1]} | "
                                 f"${item[2]:.2f}"
                             )
+
+        # ====================================================
+        # AI STORE ASSISTANT
+        # ====================================================
+
+        with customer_tabs[3]:
+
+            st.subheader(
+                "🤖 AI Store Assistant"
+            )
+
+            st.write(
+                "Ask me about products, prices, "
+                "availability, inventory, or recommendations."
+            )
+
+            st.info(
+                "I use the current store database "
+                "to answer your questions."
+            )
+
+            # Show previous messages
+            for message in st.session_state.chat_messages:
+
+                with st.chat_message(
+                    message["role"]
+                ):
+
+                    st.markdown(
+                        message["content"]
+                    )
+
+            user_question = st.chat_input(
+                "Example: Do you have black shoes in stock?"
+            )
+
+            if user_question:
+
+                # Save user question
+                st.session_state.chat_messages.append(
+                    {
+                        "role": "user",
+                        "content": user_question
+                    }
+                )
+
+                with st.chat_message("user"):
+
+                    st.markdown(
+                        user_question
+                    )
+
+                # Ask AI using current database
+                with st.chat_message("assistant"):
+
+                    with st.spinner(
+                        "Checking the store database..."
+                    ):
+
+                        answer = ask_store_ai(
+                            user_question
+                        )
+
+                    st.markdown(answer)
+
+                # Save AI answer
+                st.session_state.chat_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": answer
+                    }
+                )
